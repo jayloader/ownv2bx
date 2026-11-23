@@ -47,6 +47,7 @@ export function readSettings(env = process.env) {
   if (Boolean(certFile) !== Boolean(keyFile)) {
     throw new Error('XRAY_CERT_FILE 和 XRAY_KEY_FILE 必须同时填写');
   }
+  const stateDir = resolve(env.STATE_DIR || './state');
 
   return {
     panel: { url, token, nodeId },
@@ -58,7 +59,8 @@ export function readSettings(env = process.env) {
       certFile,
       keyFile,
     },
-    stateDir: resolve(env.STATE_DIR || './state'),
+    stateDir,
+    lockDir: env.NODE_LOCK_DIR ? resolve(env.NODE_LOCK_DIR) : stateDir,
     pullInterval: integer(env, 'PULL_INTERVAL', 60, 5, 3600),
     pushInterval: integer(env, 'PUSH_INTERVAL', 60, 5, 3600),
     staleAfter: integer(env, 'STALE_AFTER', 900, 30, 86400),

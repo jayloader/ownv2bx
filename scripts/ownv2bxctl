@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+
+set -u
+set -o pipefail
+
+unit=ownv2bx.service
+release=/opt/ownv2bx/current
+config=/etc/ownv2bx/node.env
+
+usage() {
+    cat <<'EOF'
+用法：ownv2bxctl [命令]
+
+  status                      查看服务状态
+  start | stop | restart      启动、停止或重启服务
+  enable [--now]               启用开机启动，可同时启动服务
+  disable [--now]              禁用开机启动，可同时停止服务
+  logs [--follow] [行数]      查看日志，默认显示最近 100 行
+  config [edit|check|path]     编辑配置、检查配置或查看配置路径
+  version                     显示 ownv2bx 和 Xray 版本
+  update [安装参数]            运行安装脚本更新，可指定版本或本地包
+  rollback                    切换到上一个已安装版本
+  help                        显示帮助
+
+无参数时在终端打开管理菜单。修改服务、编辑配置和回滚需要 root 权限。
+在线更新时用已登录 gh 的普通用户执行 update，安装脚本会在写入系统目录时调用 sudo。
+EOF
+}
+
+fail() {
+    printf '%s\n' "$*" >&2
+    return 1
+}
+
+require_root() {
+    if (( EUID != 0 )); then
+        fail '此命令需要 root 权限，请使用 sudo ownv2bxctl 运行。'
+    fi
+}
+
+edit_config() (
+    require_root || return
+    umask 077
+
+    local editor candidate baseline current
+    editor=${VISUAL:-${EDITOR:-}}
+    if [[ -z $editor ]]; then
+        for editor in nano vi; do
+            if command -v "$editor" >/dev/null; then break; fi
+        done
+    fi
+    command -v "$editor" >/dev/null || { fail '请将 VISUAL 或 EDITOR 设为编辑器的可执行文件名。'; return 1; }
+
+    baseline=$(cksum < "$config") || return
+    candidate=$(mktemp -- "${config}.edit.XXXXXXXX") || return
+    trap 'rm -f -- "$candidate"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    cp -- "$config" "$candidate" || return
+    "$editor" "$candidate" || return
+
+    exec 9>"$config.lock" || return
+    flock 9 || return
+    current=$(cksum < "$config") || return
+    if [[ $current != "$baseline" ]]; then
+        fail '原配置在编辑期间发生变化，请重新打开。'
+        return 1
+    fi
+    if cmp -s -- "$candidate" "$config"; then
+        printf '%s\n' '配置没有改动。'
+        return
+    fi
+
+    if ! "$release/ownv2bx" --check-config "$candidate"; then
+        fail '配置检查失败，原配置已保留。'
+        return 1
+    fi
+    chmod 0600 "$candidate" && mv -fT -- "$candidate" "$config" || return
+    printf '%s\n' '配置已保存。运行 sudo ownv2bxctl restart 使配置生效。'
+)
+
+service_action() {
+    local action=$1
+    shift
+    require_root || return
+    if [[ $action == enable || $action == disable ]]; then
+        if [[ $# -eq 1 && $1 == --now ]]; then
+            systemctl --now "$action" -- "$unit"
+            return
+        fi
+    fi
+    if (( $# > 0 )); then fail "无效参数。请查看 ownv2bxctl help。"; return 2; fi
+    systemctl "$action" -- "$unit"
+}
+
+show_logs() {
+    local lines=100
+    local args=()
+    if [[ ${1:-} == --follow || ${1:-} == -f ]]; then
+        args+=(--follow)
+        shift
+    fi
+    if (( $# > 0 )); then
+        if [[ $# -ne 1 || ! $1 =~ ^[1-9][0-9]{0,4}$ ]]; then
+            fail '用法：ownv2bxctl logs [--follow] [行数]'
+            return 2
+        fi
+        lines=$1
+    fi
+    journalctl --unit "$unit" --no-pager --lines "$lines" "${args[@]}"
+}
+
+dispatch() {
+    local action=$1
+    shift
+    case "$action" in
+        status) systemctl --no-pager status -- "$unit" ;;
+        start|stop|restart|enable|disable) service_action "$action" "$@" ;;
+        logs) show_logs "$@" ;;
+        config)
+            if (( $# > 1 )); then fail '用法：ownv2bxctl config [edit|check|path]'; return 2; fi
+            case "${1:-edit}" in
+                edit) edit_config ;;
+                check) require_root && "$release/ownv2bx" --check-config "$config" ;;
+                path) printf '%s\n' "$config" ;;
+                *) fail '用法：ownv2bxctl config [edit|check|path]'; return 2 ;;
+            esac ;;
+        version|--version)
+            "$release/ownv2bx" --version && "$release/xray" version | sed -n '1p' ;;
+        update) bash "$release/install.sh" "$@" ;;
+        rollback) require_root && bash "$release/install.sh" --rollback ;;
+        help|-h|--help) usage ;;
+        *) fail "未知命令：$action"; usage >&2; return 2 ;;
+    esac
+}
+
+menu() {
+    local choice
+    while true; do
+        cat <<'EOF'
+
+ownv2bx 管理
+  1  服务状态           6  查看日志
+  2  启动服务           7  编辑配置
+  3  停止服务           8  查看版本
+  4  重启服务           9  更新
+  5  启用开机启动      10  回滚到上一版本
+ 11  禁用开机启动       0  退出
+EOF
+        printf '请选择 [0-11]：'
+        IFS= read -r choice || return 0
+        case "$choice" in
+            1) dispatch status ;;
+            2) dispatch start ;;
+            3) dispatch stop ;;
+            4) dispatch restart ;;
+            5) dispatch enable ;;
+            6) dispatch logs ;;
+            7) dispatch config ;;
+            8) dispatch version ;;
+            9)
+                if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} && ${SUDO_UID:-0} != 0 ]]; then
+                    sudo -H -u "$SUDO_USER" -- bash "$release/install.sh"
+                else
+                    dispatch update
+                fi
+                ;;
+            10) dispatch rollback ;;
+            11) dispatch disable ;;
+            0) return 0 ;;
+            *) printf '%s\n' '请选择菜单中的数字。' >&2 ;;
+        esac
+    done
+}
+
+if (( $# > 0 )); then
+    dispatch "$@"
+elif [[ -t 0 && -t 1 ]]; then
+    menu
+else
+    usage
+fi

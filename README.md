@@ -9,11 +9,31 @@
 - 支持 ETag、用户同步、流量增量重试和 CPU、内存、交换区、磁盘状态上报。授权更新会重启 Xray，现有连接会断开。
 - 首版暂未实现其他协议、其他传输方式、用户限速、设备限制和在线 IP 汇报。带有非零限速或设备限制的用户会被暂停授权。配置包含自定义路由、出站、面板证书下发、ECH、VLESS Encryption 或多路复用时，节点启动会被拒绝。
 
-## 配置与运行
+## Linux 安装
 
-1. 在节点服务器上准备 Node.js 22 或以上版本，以及官方 Xray-core v26.11.9。按服务器的系统和架构下载、校验并解压发行包，将 `xray` 放入 `PATH`，或在配置中指定其绝对路径。该版本的代理出站默认限制访问本地及私有地址。 [Xray-core v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9)
-2. 在 Xboard 新建 VLESS 节点并选择 `tcp`，填写供客户端订阅使用的地址和端口，填写本机实际监听的服务器端口，并关联订阅用户所在的权限组。记录节点 ID 或节点标识，以及 Xboard 的节点通信密钥。 [Xboard 节点配置](https://github.com/cedar2025/Xboard/blob/master/app/Services/ServerService.php#L233-L373)
-3. 在节点服务器复制 `.env.example` 为 `.env`，填写以下对应配置。服务只需要连接面板 HTTPS，并在节点服务器防火墙放行 Xboard 中配置的入站 TCP 端口。统计 API 监听本机 `127.0.0.1`。
+Release 提供 `amd64` 和 `arm64` 单文件程序，程序内含 Node.js 运行时。服务器只需 systemd、glibc 2.28+、libstdc++ 和 libatomic 等系统库。安装脚本会校验后端和官方 Xray-core v26.11.9 的下载包，并安装 systemd 服务。 [Node.js 单文件程序](https://nodejs.org/download/release/v26.13.1/docs/api/single-executable-applications.html) · [Xray-core v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9)
+
+在 Debian 或 Ubuntu 上，使用 `sudo apt install libatomic1 ca-certificates curl unzip` 安装对应依赖。在线拉取私有 Release 需要 GitHub CLI 和该仓库的读取权限。以有 `sudo` 权限的普通用户执行，首次运行 `gh auth login` 时选择有权访问仓库的账号。 [GitHub CLI 下载 Release](https://cli.github.com/manual/gh_release_download)
+
+```sh
+gh auth login --hostname github.com
+gh release download --repo jayloader/ownv2bx --pattern 'install.sh' --pattern 'install.sh.sha256'
+sha256sum -c install.sh.sha256
+bash install.sh
+```
+
+如果节点服务器不保留 GitHub 登录凭据，在已登录的机器上额外下载对应架构的 `ownv2bx-linux-amd64.tar.gz` 或 `ownv2bx-linux-arm64.tar.gz` 及其 `.sha256`，一同复制到服务器。安装包可联网下载官方 Xray，也可传入已下载的官方压缩包完成离线安装。以下示例以 `amd64` 为例。
+
+```sh
+sha256sum -c install.sh.sha256
+bash install.sh --bundle ./ownv2bx-linux-amd64.tar.gz --xray-zip ./Xray-linux-64.zip
+```
+
+首次安装生成 `/etc/ownv2bx/node.env`，配置完成后在命令行管理菜单中启动服务。安装后由专用用户 `ownv2bx` 运行，默认将待上报流量保存在 `/var/lib/ownv2bx`。
+
+## 对接 Xboard
+
+在 Xboard 新建 VLESS 节点并选择 `tcp`，填写客户端访问地址和端口，以及服务器实际监听的 TCP 端口，并关联用户所在权限组。在节点服务器防火墙放行这个入站端口，并允许访问面板 HTTPS。统计 API 监听本机 `127.0.0.1`。 [Xboard 节点配置](https://github.com/cedar2025/Xboard/blob/master/app/Services/ServerService.php#L233-L373)
 
 | 变量 | 填写方式 |
 | --- | --- |
@@ -24,45 +44,33 @@
 | `XRAY_LISTEN` | 监听 IP，默认 `0.0.0.0`。 |
 | `XRAY_API_PORT`、`STATE_DIR` | 本机统计端口和状态目录。每个节点实例使用不同的端口和目录。 |
 
-TLS 节点的证书应覆盖客户端下载配置使用的域名。REALITY 节点在面板填入目标域名、目标端口、公钥、私钥和 Short ID。Linux 可以先用以下命令在前台运行，Windows 使用同一条 `node` 命令。
+TLS 节点的证书应覆盖客户端配置使用的域名，证书和私钥需能被 `ownv2bx` 服务读取。REALITY 节点在面板填入目标域名、目标端口、公钥、私钥和 Short ID。
 
 ```sh
-cp .env.example .env
-chmod 600 .env
-# 编辑 .env 后启动
-node --env-file=.env src/main.mjs
+sudo ownv2bxctl config
+sudo ownv2bxctl enable --now
+ownv2bxctl status
 ```
 
 看到 `Xray 已载入节点配置` 后，从 Xboard 订阅导入节点并发起一次请求。面板的流量更新时间在第一次有流量的上报之后刷新。UniProxy V1 的鉴权密钥放在查询参数里，面板和反向代理的访问日志应避免记录该参数。仓库忽略默认状态目录、实际 `.env` 和常见私钥文件。 [Xboard UniProxy 路由](https://github.com/cedar2025/Xboard/blob/master/app/Http/Routes/V1/ServerRoute.php) · [节点鉴权](https://github.com/cedar2025/Xboard/blob/master/app/Http/Middleware/Server.php)
 
-### Linux 持续运行
+## 命令行管理
 
-可用 systemd 运行。以下单元假设代码位于 `/opt/ownv2bx`，已有专用用户 `ownv2bx`，`node` 位于 `/usr/bin/node`。让该用户能读取 `.env`、Xray 和 TLS 文件。示例使用 `8443` 这类非特权端口。
+运行 `sudo ownv2bxctl` 可打开有权限修改系统服务的中文菜单。在线更新用已登录 GitHub CLI 的普通用户运行 `ownv2bxctl update`。
 
-```ini
-[Unit]
-Description=ownv2bx Xboard node
-Wants=network-online.target
-After=network-online.target
+| 命令 | 操作 |
+| --- | --- |
+| `ownv2bxctl status` | 查看服务状态。 |
+| `sudo ownv2bxctl start` / `sudo ownv2bxctl stop` / `sudo ownv2bxctl restart` | 启动、停止或重启。 |
+| `sudo ownv2bxctl enable --now` / `sudo ownv2bxctl disable` | 启动并设置开机启动，或取消开机启动。 |
+| `sudo ownv2bxctl logs` | 查看最近日志。 |
+| `sudo ownv2bxctl config` | 编辑并校验配置。 |
+| `ownv2bxctl version` | 查看后端和 Xray 版本。 |
+| `ownv2bxctl update` | 从私有 Release 拉取更新。使用同一个已登录的普通用户运行。 |
+| `ownv2bxctl update --version v0.2.0` | 安装指定版本。也可传 `--bundle` 使用本地包。 |
+| `sudo ownv2bxctl rollback` | 切回上一个已安装版本。 |
 
-[Service]
-User=ownv2bx
-WorkingDirectory=/opt/ownv2bx
-StateDirectory=ownv2bx
-StateDirectoryMode=0700
-Environment=STATE_DIR=/var/lib/ownv2bx
-ExecStart=/usr/bin/node --env-file=.env src/main.mjs
-Restart=on-failure
-RestartSec=5
-KillMode=mixed
-TimeoutStopSec=60
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-将单元保存为 `/etc/systemd/system/ownv2bx.service` 后，运行 `sudo systemctl daemon-reload` 和 `sudo systemctl enable --now ownv2bx`。用 `journalctl -u ownv2bx -f` 查看日志。源码可以存放在 GitHub 私有仓库，节点进程运行在你的服务器上。
+更新保留 `/etc/ownv2bx/node.env` 和流量队列。运行中的服务会在更新时重启，若 systemd 启动失败会切回上一版。若未来版本更新所需的 Xray-core 版本，先重新下载对应 Release 的安装脚本再更新。
 
 ### 中断和计费
 
@@ -70,7 +78,11 @@ WantedBy=multi-user.target
 
 流量增量先写入 `STATE_DIR/traffic.json`，面板确认后清空待上报队列。UniProxy 的流量接口按次累加且没有幂等键。面板收到上报但确认丢失，或服务器在确认后、清空队列前掉电，下一次重试可能重复记账。内核意外退出时，上次采样之后的流量可能丢失。 [Xboard 流量接收逻辑](https://github.com/cedar2025/Xboard/blob/master/app/Services/ServerService.php#L113-L133)
 
-进程崩溃后如果遗留 `STATE_DIR/node.lock`，先确认其中的 PID 和它启动的 Xray 已退出，再移除该锁文件并重启服务。保留 `traffic.json` 可继续补报。为不同面板或节点更换配置时，使用新的状态目录。
+systemd 会随服务生命周期清理锁目录。手动运行时若异常退出并留下 `STATE_DIR/node.lock`，先确认记录的进程和 Xray 已退出，再移除锁文件。为不同面板或节点更换配置时，使用新的状态目录。
+
+## 从源码运行
+
+源码运行需 Node.js 22+ 和官方 Xray-core v26.11.9，可用于本地开发或 Windows 测试。将 `.env.example` 复制为 `.env` 并填写配置，设置 `XRAY_BIN` 或将 Xray 放入 `PATH`，再执行 `node --env-file=.env src/main.mjs`。
 
 ## 测试
 

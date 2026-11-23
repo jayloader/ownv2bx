@@ -1,0 +1,221 @@
+name: Release Linux packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - package.json
+      - .github/workflows/release.yml
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ownv2bx-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Check package version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(node -p 'require("./package.json").version')"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Release requires a major.minor.patch version in package.json.' >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF" != "refs/tags/$tag" ]]; then
+            echo 'The pushed tag must match package.json.' >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if draft=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .draft 2>release-error); then
+            if [[ "$draft" == false ]]; then echo 'Release already published.'; fi
+            echo "build=$draft" >> "$GITHUB_OUTPUT"
+          elif grep -Fq '(HTTP 404)' release-error; then
+            echo 'build=true' >> "$GITHUB_OUTPUT"
+          else
+            cat release-error >&2
+            exit 1
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            xray: Xray-linux-64.zip
+            xray-sha256: b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            xray: Xray-linux-arm64-v8a.zip
+            xray-sha256: 64ed6858982a7f5eb85d88b811089063bd4f17561f4c8f44e0f1dc8e6f6430be
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.13.1'
+          package-manager-cache: false
+      - name: Test with official Xray-core
+        env:
+          XRAY_ASSET: ${{ matrix.xray }}
+          XRAY_SHA256: ${{ matrix.xray-sha256 }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            -o "$RUNNER_TEMP/$XRAY_ASSET" \
+            "https://github.com/XTLS/Xray-core/releases/download/v26.11.9/$XRAY_ASSET"
+          printf '%s  %s\n' "$XRAY_SHA256" "$RUNNER_TEMP/$XRAY_ASSET" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/$XRAY_ASSET" xray -d "$RUNNER_TEMP/test-xray"
+          chmod +x "$RUNNER_TEMP/test-xray/xray"
+          XRAY_TEST_BIN="$RUNNER_TEMP/test-xray/xray" npm test
+          for script in scripts/package-linux.sh scripts/install.sh scripts/ownv2bxctl; do
+            bash -n "$script"
+          done
+      - name: Package and check executable
+        run: |
+          export SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+          bash scripts/package-linux.sh
+      - name: Test binary installation
+        env:
+          ARCH: ${{ matrix.arch }}
+          XRAY_ASSET: ${{ matrix.xray }}
+        run: |
+          sudo bash scripts/install.sh --bundle "dist/ownv2bx-linux-$ARCH.tar.gz" \
+            --xray-zip "$RUNNER_TEMP/$XRAY_ASSET"
+          sudo /usr/local/bin/ownv2bxctl version
+          sudo test -f /etc/ownv2bx/node.env
+          test "$(sudo stat -c '%U:%a' /etc/ownv2bx/node.env)" = 'root:600'
+          sudo systemctl cat ownv2bx.service
+          systemctl show ownv2bx.service --property=LoadState --value | grep -qx loaded
+          systemctl show ownv2bx.service --property=ActiveState --value | grep -qx inactive
+      - name: Start installed service against a local panel
+        run: |
+          node --input-type=module -e '
+            import { createServer } from "node:http";
+            createServer(({ url }, response) => {
+              const endpoint = new URL(url, "http://localhost").pathname.split("/").at(-1);
+              const body = endpoint === "config"
+                ? { protocol: "vless", server_port: 14882, network: "tcp", tls: 0 }
+                : endpoint === "user" ? { users: [] } : { data: true };
+              response.writeHead(200, { "Content-Type": "application/json" });
+              response.end(JSON.stringify(body));
+            }).listen(14881, "127.0.0.1");
+          ' &
+          mock_pid=$!
+          trap 'sudo systemctl stop ownv2bx.service; kill "$mock_pid" 2>/dev/null || true' EXIT
+          timeout 10 bash -c 'until curl -fsS -o /dev/null http://127.0.0.1:14881/health; do sleep 1; done'
+          cat > "$RUNNER_TEMP/test-node.env" <<'ENV'
+          XBOARD_URL=http://127.0.0.1:14881
+          XBOARD_TOKEN=local-workflow-test
+          XBOARD_NODE_ID=1
+          XRAY_LISTEN=127.0.0.1
+          XRAY_API_PORT=14883
+          ALLOW_HTTP_PANEL=1
+          ALLOW_PLAINTEXT_NODE=1
+          PULL_INTERVAL=5
+          ENV
+          sudo install -m 0600 "$RUNNER_TEMP/test-node.env" /etc/ownv2bx/node.env
+          sudo /usr/local/bin/ownv2bxctl config check
+          sudo /usr/local/bin/ownv2bxctl start
+          sudo /usr/local/bin/ownv2bxctl status
+          sudo test -d /var/lib/ownv2bx
+          if ! timeout 20 bash -c 'until (echo > /dev/tcp/127.0.0.1/14882) 2>/dev/null; do sleep 1; done'; then
+            sudo /usr/local/bin/ownv2bxctl logs
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ownv2bx-linux-${{ matrix.arch }}
+          path: |
+            dist/ownv2bx-linux-${{ matrix.arch }}.tar.gz
+            dist/ownv2bx-linux-${{ matrix.arch }}.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ownv2bx-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Check release assets
+        working-directory: dist
+        run: |
+          sha256sum --check --strict ownv2bx-linux-amd64.tar.gz.sha256 ownv2bx-linux-arm64.tar.gz.sha256
+          tar -xOf ownv2bx-linux-amd64.tar.gz install.sh > install.sh
+          sha256sum install.sh > install.sh.sha256
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          tag_endpoint="repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
+          tag_object() {
+            gh api "$tag_endpoint" --jq '.object | [.type, .sha] | @tsv'
+          }
+          if ! ref=$(tag_object 2>release-error); then
+            if ! grep -Fq '(HTTP 404)' release-error || [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              cat release-error >&2
+              exit 1
+            fi
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$RELEASE_TAG" -f sha="$GITHUB_SHA" >/dev/null
+            ref=$(tag_object)
+          fi
+          read -r kind sha <<< "$ref"
+          if [[ "$kind" == tag ]]; then
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object.sha')
+          fi
+          if [[ "$sha" != "$GITHUB_SHA" ]]; then
+            echo 'The release tag points to a different commit.' >&2
+            exit 1
+          fi
+
+          notes="Linux x86-64 and ARM64 packages. Source commit: $GITHUB_SHA"
+          if view=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,body 2>release-error); then
+            if jq -e '.isDraft == false' <<< "$view" >/dev/null; then
+              echo 'Release already published.'
+              exit 0
+            fi
+            if ! jq -e --arg notes "$notes" '.body == $notes' <<< "$view" >/dev/null; then
+              echo 'An existing draft must be reviewed before publishing.' >&2
+              exit 1
+            fi
+          elif grep -Eq 'release not found|\(HTTP 404\)' release-error; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "$RELEASE_TAG" --notes "$notes"
+          else
+            cat release-error >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -3,6 +3,7 @@
 !.env.example
 /state/
 /node_modules/
+/dist/
 *.key
 *.pem
 *.pfx
