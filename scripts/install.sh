@@ -23,7 +23,7 @@ usage() {
   bash install.sh --bundle PATH [--xray-zip PATH]
   bash install.sh --rollback
 
-默认从 jayloader/ownv2bx 下载最新 GitHub Release，私有仓库使用已登录的 gh。
+默认用 curl 下载 jayloader/ownv2bx 的公开 Release。私有仓库可使用已登录的 gh。
 请用普通用户运行下载；写入系统目录时会使用 sudo。
 离线安装提供本机发行包、同名 .sha256 文件及官方 Xray zip。
 EOF
@@ -62,6 +62,36 @@ verify_digest() {
   local actual
   actual=$(digest "$1") || die "无法读取 $1"
   [[ $actual == "$2" ]] || die 'SHA-256 校验失败，安装未继续'
+}
+
+fetch_https() {
+  curl -fLSs --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
+    -o "$2" -- "$1"
+}
+
+download_release() {
+  local root="https://github.com/$repo/releases" public_url
+  local -a download
+  [[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && $repo != -* ]] || die '仓库名必须采用 OWNER/REPO 格式'
+  [[ $version != -* ]] || die '版本号无效'
+
+  if command -v curl >/dev/null && [[ $version =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+    if [[ $version == latest ]]; then
+      public_url=$root/latest/download
+    else
+      public_url=$root/download/$version
+    fi
+    if fetch_https "$public_url/$bundle_asset.sha256" "$work/$bundle_asset.sha256" 2>/dev/null \
+      && fetch_https "$public_url/$bundle_asset" "$work/$bundle_asset"; then
+      return 0
+    fi
+  fi
+
+  command -v gh >/dev/null || die '无法下载公开 Release。请检查仓库和版本；私有仓库可登录 gh，也可使用 --bundle'
+  rm -f -- "$work/$bundle_asset" "$work/$bundle_asset.sha256"
+  download=(gh release download --repo "$repo" --dir "$work" --pattern "$bundle_asset" --pattern "$bundle_asset.sha256")
+  if [[ $version != latest ]]; then download+=("$version"); fi
+  GH_PROMPT_DISABLED=1 "${download[@]}" || die 'Release 下载失败。请检查仓库、版本和 gh 登录权限，或使用 --bundle'
 }
 
 as_root() {
@@ -274,12 +304,7 @@ if [[ -n $bundle ]]; then
   [[ -s $bundle.sha256 ]] || die '请将同名 .sha256 校验文件放在发行包旁边'
   cp -- "$bundle.sha256" "$work/$bundle_asset.sha256"
 else
-  require gh
-  [[ $repo =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && $repo != -* ]] || die '仓库名必须采用 OWNER/REPO 格式'
-  [[ $version != -* ]] || die '版本号无效'
-  download=(gh release download --repo "$repo" --dir "$work" --pattern "$bundle_asset" --pattern "$bundle_asset.sha256")
-  if [[ $version != latest ]]; then download+=("$version"); fi
-  GH_PROMPT_DISABLED=1 "${download[@]}" || die '下载私有发行版失败。请先用普通用户运行 gh auth login，或使用 --bundle'
+  download_release
 fi
 
 archive_digest=$(digest "$work/$bundle_asset")
@@ -290,8 +315,7 @@ if [[ -n $xray_zip ]]; then
   cp -- "$xray_zip" "$work/$xray_asset"
 else
   require curl
-  curl -fLSs --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
-    "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/$xray_asset" -o "$work/$xray_asset"
+  fetch_https "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/$xray_asset" "$work/$xray_asset"
 fi
 verify_digest "$work/$xray_asset" "$xray_digest"
 as_root --apply install "$work" "$archive_digest"

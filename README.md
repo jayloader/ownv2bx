@@ -13,16 +13,17 @@
 
 Release 提供 `amd64` 和 `arm64` 单文件程序，程序内含 Node.js 运行时。服务器只需 systemd、glibc 2.28+、libstdc++ 和 libatomic 等系统库。安装脚本会校验后端和官方 Xray-core v26.11.9 的下载包，并安装 systemd 服务。 [Node.js 单文件程序](https://nodejs.org/download/release/v26.13.1/docs/api/single-executable-applications.html) · [Xray-core v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9)
 
-在 Debian 或 Ubuntu 上，使用 `sudo apt install libatomic1 ca-certificates curl unzip` 安装对应依赖。在线拉取私有 Release 需要 GitHub CLI 和该仓库的读取权限。以有 `sudo` 权限的普通用户执行，首次运行 `gh auth login` 时选择有权访问仓库的账号。 [GitHub CLI 下载 Release](https://cli.github.com/manual/gh_release_download)
+在 Debian 或 Ubuntu 上，使用 `sudo apt install libatomic1 ca-certificates curl unzip` 安装对应依赖。以有 `sudo` 权限的普通用户执行以下命令，从公开 Release 下载并校验安装脚本。 [GitHub Release](https://github.com/jayloader/ownv2bx/releases/latest)
 
 ```sh
-gh auth login --hostname github.com
-gh release download --repo jayloader/ownv2bx --pattern 'install.sh' --pattern 'install.sh.sha256'
-sha256sum -c install.sh.sha256
-bash install.sh
+base=https://github.com/jayloader/ownv2bx/releases/latest/download
+curl -fSLO "$base/install.sh" &&
+  curl -fSLO "$base/install.sh.sha256" &&
+  sha256sum -c install.sh.sha256 &&
+  bash install.sh
 ```
 
-如果节点服务器不保留 GitHub 登录凭据，在已登录的机器上额外下载对应架构的 `ownv2bx-linux-amd64.tar.gz` 或 `ownv2bx-linux-arm64.tar.gz` 及其 `.sha256`，一同复制到服务器。安装包可联网下载官方 Xray，也可传入已下载的官方压缩包完成离线安装。以下示例以 `amd64` 为例。
+如需离线安装，下载对应架构的 `ownv2bx-linux-amd64.tar.gz` 或 `ownv2bx-linux-arm64.tar.gz` 及其 `.sha256`，再和安装脚本、官方 Xray 压缩包一起复制到服务器。以下示例以 `amd64` 为例。
 
 ```sh
 sha256sum -c install.sh.sha256
@@ -56,7 +57,7 @@ ownv2bxctl status
 
 ## 命令行管理
 
-运行 `sudo ownv2bxctl` 可打开有权限修改系统服务的中文菜单。在线更新用已登录 GitHub CLI 的普通用户运行 `ownv2bxctl update`。
+运行 `sudo ownv2bxctl` 可打开有权限修改系统服务的中文菜单。公开仓库可以直接用 `ownv2bxctl update` 更新。使用 `--repo` 指定私有仓库时，先以有读取权限的普通用户登录 `gh`。 [GitHub CLI 下载 Release](https://cli.github.com/manual/gh_release_download)
 
 | 命令 | 操作 |
 | --- | --- |
@@ -66,11 +67,11 @@ ownv2bxctl status
 | `sudo ownv2bxctl logs` | 查看最近日志。 |
 | `sudo ownv2bxctl config` | 编辑并校验配置。 |
 | `ownv2bxctl version` | 查看后端和 Xray 版本。 |
-| `ownv2bxctl update` | 从私有 Release 拉取更新。使用同一个已登录的普通用户运行。 |
-| `ownv2bxctl update --version v0.2.0` | 安装指定版本。也可传 `--bundle` 使用本地包。 |
+| `ownv2bxctl update` | 从 GitHub Release 拉取最新版。 |
+| `ownv2bxctl update --version v0.2.1` | 安装指定版本。也可传 `--bundle` 使用本地包。 |
 | `sudo ownv2bxctl rollback` | 切回上一个已安装版本。 |
 
-更新保留 `/etc/ownv2bx/node.env` 和流量队列。运行中的服务会在更新时重启，若 systemd 启动失败会切回上一版。若未来版本更新所需的 Xray-core 版本，先重新下载对应 Release 的安装脚本再更新。
+更新保留 `/etc/ownv2bx/node.env` 和流量队列。运行中的服务会在更新时重启，若 systemd 启动失败会切回上一版。已安装 v0.2.0 的服务器按上面的匿名安装命令升级一次，之后即可直接使用 `ownv2bxctl update`。若未来版本更新所需的 Xray-core 版本，先重新下载对应 Release 的安装脚本再更新。
 
 ### 中断和计费
 
