@@ -2,17 +2,26 @@
 set -euo pipefail
 umask 077
 
-readonly APP=/opt/ownv2bx
+readonly APP=/opt/xbray
 readonly CURRENT=$APP/current
 readonly PREVIOUS=$APP/previous
 readonly RELEASES=$APP/releases
-readonly CONFIG_DIR=/etc/ownv2bx
+readonly CONFIG_DIR=/etc/xbray
 readonly CONFIG=$CONFIG_DIR/node.env
-readonly UNIT=ownv2bx.service
+readonly STATE_DIR=/var/lib/xbray
+readonly TRAFFIC=$STATE_DIR/traffic.json
+readonly UNIT=xbray.service
 readonly UNIT_PATH=/etc/systemd/system/$UNIT
-readonly MANAGER=/usr/local/bin/ownv2bxctl
+readonly MIGRATION_DROP_IN=$UNIT_PATH.d/10-legacy-group.conf
+readonly MANAGER=/usr/local/bin/xbrayctl
+readonly LEGACY=ownv2bx
+readonly LEGACY_CONFIG=/etc/$LEGACY/node.env
+readonly LEGACY_STATE=/var/lib/$LEGACY
+readonly LEGACY_TRAFFIC=$LEGACY_STATE/traffic.json
+readonly LEGACY_UNIT=$LEGACY.service
+readonly LEGACY_LOCK=/opt/$LEGACY/.install.lock
 readonly XRAY_VERSION=v26.11.9
-readonly -a MEMBERS=(LICENSE.nodejs install.sh node.env.example ownv2bx ownv2bx.service ownv2bxctl)
+readonly -a MEMBERS=(LICENSE.nodejs install.sh node.env.example xbray xbray.service xbrayctl)
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -23,9 +32,10 @@ usage() {
   bash install.sh --bundle PATH [--xray-zip PATH]
   bash install.sh --rollback
 
-默认用 curl 下载 jayloader/ownv2bx 的公开 Release。私有仓库可使用已登录的 gh。
+默认用 curl 下载 jayloader/xbray 的公开 Release。私有仓库可使用已登录的 gh。
 请用普通用户运行下载；写入系统目录时会使用 sudo。
 离线安装提供本机发行包、同名 .sha256 文件及官方 Xray zip。
+如果检测到上一代 systemd 安装，首次安装会迁移配置及流量队列。
 EOF
 }
 
@@ -39,12 +49,12 @@ require() {
 architecture() {
   case $(uname -m) in
     x86_64)
-      bundle_asset=ownv2bx-linux-amd64.tar.gz
+      bundle_asset=xbray-linux-amd64.tar.gz
       xray_asset=Xray-linux-64.zip
       xray_digest=b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82
       ;;
     aarch64|arm64)
-      bundle_asset=ownv2bx-linux-arm64.tar.gz
+      bundle_asset=xbray-linux-arm64.tar.gz
       xray_asset=Xray-linux-arm64-v8a.zip
       xray_digest=64ed6858982a7f5eb85d88b811089063bd4f17561f4c8f44e0f1dc8e6f6430be
       ;;
@@ -145,7 +155,7 @@ activate() {
   esac
   if [[ $was_active == active ]]; then
     [[ -n $old ]] || die '已有运行中的同名服务，请先处理服务冲突'
-    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$next/ownv2bx" --check-config "$CONFIG" || die '配置校验失败，现有服务继续运行'
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$next/xbray" --check-config "$CONFIG" || die '配置校验失败，现有服务继续运行'
   fi
 
   if install_unit "$next/$UNIT" && point_link "$next" "$CURRENT" \
@@ -161,12 +171,139 @@ activate() {
       && systemctl daemon-reload && restart_if_active; then
       die '服务切换失败，已恢复上一版本'
     fi
-    die '服务切换失败，自动恢复未成功。请检查 systemctl status ownv2bx'
+    die '服务切换失败，自动恢复未成功。请检查 systemctl status xbray'
   fi
   rm -f -- "$UNIT_PATH" "$CURRENT"
   systemctl daemon-reload || true
   die '首次安装未能完成，请检查 systemd 日志后重试'
 }
+
+copy_0600() {
+  local source=$1 target=$2 owner=$3 temp
+  temp=$(mktemp "$target.XXXXXXXX") || return
+  if ! install -m 0600 -o "$owner" -g "$owner" -- "$source" "$temp" || ! mv -Tf -- "$temp" "$target"; then
+    rm -f -- "$temp"
+    return 1
+  fi
+}
+
+stopped_unit() {
+  local state
+  state=$(systemctl show --property=ActiveState --value "$1") || return
+  [[ $state == inactive || $state == failed ]]
+}
+
+restore_legacy_traffic() {
+  [[ -e $TRAFFIC || -L $TRAFFIC ]] || return 0
+  [[ -f $TRAFFIC && ! -L $TRAFFIC && ! -L $LEGACY_STATE && ! -L $LEGACY_TRAFFIC ]] || return 1
+  if [[ -f $LEGACY_TRAFFIC ]] && cmp -s -- "$TRAFFIC" "$LEGACY_TRAFFIC"; then return 0; fi
+  if [[ ! -d $LEGACY_STATE ]]; then
+    install -d -m 0700 -o "$LEGACY" -g "$LEGACY" -- "$LEGACY_STATE" || return
+  fi
+  copy_0600 "$TRAFFIC" "$LEGACY_TRAFFIC" "$LEGACY"
+}
+
+restore_migration() {
+  local exit_status=$1
+  if (( exit_status == 0 )); then return 0; fi
+  trap '' INT TERM
+  # The replacement may already have acknowledged traffic. Return its final
+  # queue to the legacy service before starting it again.
+  if (( new_start )) && ! { systemctl stop "$UNIT" && stopped_unit "$UNIT" && restore_legacy_traffic; }; then
+    die '无法安全交还流量队列。请检查 xbray 停止状态和两份流量文件，旧服务保持停用'
+  fi
+  if (( new_enable )) && ! systemctl disable "${legacy_runtime[@]}" "$UNIT"; then
+    die '无法撤销 xbray 的开机启动，旧服务保持停用'
+  fi
+
+  if (( new_activate )); then rm -f -- "$UNIT_PATH" "$CURRENT"; fi
+  if (( new_manager )); then rm -f -- "$MANAGER"; fi
+  if (( new_drop_in )); then rm -f -- "$MIGRATION_DROP_IN"; fi
+  if (( new_config )); then rm -f -- "$CONFIG"; fi
+  if (( new_traffic || new_start )); then rm -f -- "$TRAFFIC"; fi
+  systemctl daemon-reload || die '迁移回退时无法重新载入 systemd，请检查旧服务状态'
+  if (( legacy_enabled )); then
+    systemctl enable "${legacy_runtime[@]}" "$LEGACY_UNIT" || die '迁移回退时无法恢复旧服务的开机启动'
+  fi
+  if [[ $legacy_active == active ]]; then
+    systemctl start "$LEGACY_UNIT" || die '迁移回退时无法启动旧服务'
+  fi
+  printf '%s\n' '迁移失败，已恢复旧服务设置。' >&2
+}
+
+migrate() (
+  local next=$1 drop_ins enable_state
+  [[ -f $LEGACY_CONFIG && ! -L $LEGACY_CONFIG && -d $(dirname "$LEGACY_LOCK") ]] \
+    || die '检测到旧服务，但未找到标准安装配置。请先备份旧配置和流量队列'
+  [[ ! -e $CONFIG && ! -L $CONFIG && ! -e $TRAFFIC && ! -L $TRAFFIC \
+    && ! -L $STATE_DIR && ! -L $LEGACY_STATE && ! -L $LEGACY_TRAFFIC \
+    && ! -e $MIGRATION_DROP_IN && ! -L $MIGRATION_DROP_IN ]] \
+    || die '迁移路径已有配置或流量文件，请先检查并备份，旧服务暂不切换'
+  require grep cmp
+  exec 8>"$LEGACY_LOCK"
+  flock -n 8 || die '旧服务正在安装或更新，请稍后重试'
+  drop_ins=$(systemctl show --property=DropInPaths --value "$LEGACY_UNIT")
+  if [[ -n $drop_ins ]] || grep -Eq '^[[:space:]]*(STATE_DIR|NODE_LOCK_DIR|XRAY_BIN)[[:space:]]*=' "$LEGACY_CONFIG"; then
+    die '旧服务使用自定义 systemd 或状态路径。请先备份并手动迁移这些设置'
+  fi
+  getent group "$LEGACY" >/dev/null && getent passwd "$LEGACY" >/dev/null \
+    || die '未找到旧服务的运行账号，请先检查旧安装'
+  legacy_active=$(systemctl show --property=ActiveState --value "$LEGACY_UNIT")
+  case $legacy_active in
+    active) env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$next/xbray" --check-config "$LEGACY_CONFIG" ;;
+    inactive|failed) ;;
+    *) die '旧服务正在切换状态，请稍后重试' ;;
+  esac
+  legacy_enabled=0
+  legacy_runtime=()
+  enable_state=$(systemctl is-enabled "$LEGACY_UNIT" || true)
+  case $enable_state in
+    enabled) legacy_enabled=1 ;;
+    enabled-runtime) legacy_enabled=1; legacy_runtime=(--runtime) ;;
+    disabled) ;;
+    *) die '旧服务使用自定义开机状态，请先检查 systemd 设置' ;;
+  esac
+
+  new_start=0 new_enable=0 new_activate=0 new_manager=0 new_drop_in=0 new_config=0 new_traffic=0
+  trap 'restore_migration "$?"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if (( legacy_enabled )); then systemctl disable "${legacy_runtime[@]}" "$LEGACY_UNIT"; fi
+  systemctl stop "$LEGACY_UNIT"
+  stopped_unit "$LEGACY_UNIT" || die '旧服务仍在运行，停止迁移'
+
+  if [[ ! -d $CONFIG_DIR ]]; then install -d -m 0700 -- "$CONFIG_DIR"; fi
+  new_config=1
+  copy_0600 "$LEGACY_CONFIG" "$CONFIG" root
+  if [[ -e $LEGACY_TRAFFIC ]]; then
+    [[ -f $LEGACY_TRAFFIC && ! -L $LEGACY_TRAFFIC ]] || die '旧流量队列必须是普通文件'
+    if [[ ! -d $STATE_DIR ]]; then install -d -m 0700 -o xbray -g xbray -- "$STATE_DIR"; fi
+    new_traffic=1
+    copy_0600 "$LEGACY_TRAFFIC" "$TRAFFIC" xbray
+  fi
+  # Existing TLS files can be readable through the former service group.
+  install -d -m 0755 -- "$UNIT_PATH.d"
+  new_drop_in=1
+  printf '[Service]\nSupplementaryGroups=%s\n' "$LEGACY" > "$MIGRATION_DROP_IN"
+  if [[ ! -L $MANAGER ]]; then
+    new_manager=1
+    point_link "$CURRENT/xbrayctl" "$MANAGER"
+  fi
+  new_activate=1
+  activate "$next" ''
+  if (( legacy_enabled )); then
+    new_enable=1
+    systemctl enable "${legacy_runtime[@]}" "$UNIT"
+  fi
+  if [[ $legacy_active == active ]]; then
+    new_start=1
+    systemctl start "$UNIT"
+    sleep 2
+    systemctl is-active --quiet "$UNIT" || die 'xbray 启动后退出，正在恢复旧服务'
+  fi
+  trap - EXIT INT TERM
+  printf '%s\n' '已迁移旧配置及流量队列。旧服务已停止并停用，原文件保留。运行 xbrayctl 查看管理命令。'
+)
 
 apply() {
   (( EUID == 0 )) || die '系统安装步骤需要管理员权限'
@@ -184,7 +321,7 @@ apply() {
     die "已有 $UNIT_PATH，请先处理现有服务"
   fi
   if [[ -e $MANAGER || -L $MANAGER ]]; then
-    [[ -L $MANAGER && $(readlink -- "$MANAGER") == "$CURRENT/ownv2bxctl" ]] || die "已有 $MANAGER，请先处理命令冲突"
+    [[ -L $MANAGER && $(readlink -- "$MANAGER") == "$CURRENT/xbrayctl" ]] || die "已有 $MANAGER，请先处理命令冲突"
   fi
 
   if [[ $1 == rollback ]]; then
@@ -219,22 +356,31 @@ apply() {
       [[ -s $candidate/$member ]] || die "发行包缺少有效的 $member"
     done
     unzip -p "$input_dir/$xray_asset" xray > "$candidate/xray"
-    chmod 0755 -- "$candidate" "$candidate/ownv2bx" "$candidate/ownv2bxctl" "$candidate/install.sh" "$candidate/xray"
+    chmod 0755 -- "$candidate" "$candidate/xbray" "$candidate/xbrayctl" "$candidate/install.sh" "$candidate/xray"
     chmod 0644 -- "$candidate/$UNIT" "$candidate/node.env.example" "$candidate/LICENSE.nodejs"
-    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$candidate/ownv2bx" --version \
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "$candidate/xbray" --version \
       || die '无法运行发行版。请检查 glibc 2.28+、libstdc++、libatomic 和 CPU 架构'
     "$candidate/xray" version >/dev/null || die '无法运行 Xray-core'
     mv -T -- "$candidate" "$next"
     trap - EXIT
   fi
 
-  if ! getent group ownv2bx >/dev/null; then
+  if ! getent group xbray >/dev/null; then
     require groupadd
-    groupadd --system ownv2bx
+    groupadd --system xbray
   fi
-  if ! getent passwd ownv2bx >/dev/null; then
+  if ! getent passwd xbray >/dev/null; then
     require useradd
-    useradd --system --gid ownv2bx --home-dir /var/lib/ownv2bx --shell /usr/sbin/nologin ownv2bx
+    useradd --system --gid xbray --home-dir "$STATE_DIR" --shell /usr/sbin/nologin xbray
+  fi
+  if [[ -z $old ]]; then
+    local legacy_load
+    legacy_load=$(systemctl show --property=LoadState --value "$LEGACY_UNIT" || true)
+    case $legacy_load in
+      loaded) migrate "$next"; return ;;
+      not-found|'') ;;
+      *) die '检测到旧服务，但该服务不可正常管理，请先检查 systemd 配置' ;;
+    esac
   fi
   if [[ ! -e $CONFIG ]]; then
     [[ ! -L $CONFIG ]] || die '配置文件链接已损坏'
@@ -244,7 +390,7 @@ apply() {
 
   local new_manager=0
   if [[ ! -L $MANAGER ]]; then
-    point_link "$CURRENT/ownv2bxctl" "$MANAGER" || die '无法安装 ownv2bxctl 命令'
+    point_link "$CURRENT/xbrayctl" "$MANAGER" || die '无法安装 xbrayctl 命令'
     new_manager=1
   fi
   if (( new_manager )); then
@@ -252,13 +398,13 @@ apply() {
   fi
   activate "$next" "$old"
   trap - EXIT
-  printf '%s\n' '安装完成。运行 ownv2bxctl 查看管理命令。'
+  printf '%s\n' '安装完成。运行 xbrayctl 查看管理命令。'
   if [[ -z $old ]]; then
-    printf '%s\n' '首次启动前运行 sudo ownv2bxctl config，然后运行 sudo ownv2bxctl enable --now。'
+    printf '%s\n' '首次启动前运行 sudo xbrayctl config，然后运行 sudo xbrayctl enable --now。'
   fi
 }
 
-repo=jayloader/ownv2bx
+repo=jayloader/xbray
 version=latest
 bundle=''
 xray_zip=''
@@ -290,7 +436,7 @@ done
 require readlink
 self=$(readlink -f -- "${BASH_SOURCE[0]}")
 if (( rollback )); then
-  [[ -z $bundle && -z $xray_zip && $version == latest && $repo == jayloader/ownv2bx ]] || die '--rollback 不能和下载选项一起使用'
+  [[ -z $bundle && -z $xray_zip && $version == latest && $repo == jayloader/xbray ]] || die '--rollback 不能和下载选项一起使用'
   as_root --apply rollback
   exit
 fi

@@ -95,7 +95,7 @@ test('real Xray serves TLS and REALITY, enforces outbound rules, and captures tr
   skip: !testBinary && 'Set XRAY_TEST_BIN to an official Xray executable',
   timeout: 35000,
 }, async (context) => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'ownv2bx-test-'));
+  const stateDir = await mkdtemp(join(tmpdir(), 'xbray-test-'));
   const cert = join(stateDir, 'cert');
   const runFile = promisify(execFile);
   await runFile(testBinary, ['tls', 'cert', '-file', cert, '-name', 'localhost', '-domain', 'localhost']);

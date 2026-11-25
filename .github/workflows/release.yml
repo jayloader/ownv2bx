@@ -17,7 +17,7 @@ defaults:
     shell: bash
 
 concurrency:
-  group: ownv2bx-release
+  group: xbray-release
   cancel-in-progress: false
 
 jobs:
@@ -92,42 +92,15 @@ jobs:
           unzip -q "$RUNNER_TEMP/$XRAY_ASSET" xray -d "$RUNNER_TEMP/test-xray"
           chmod +x "$RUNNER_TEMP/test-xray/xray"
           XRAY_TEST_BIN="$RUNNER_TEMP/test-xray/xray" npm test
-          for script in scripts/package-linux.sh scripts/install.sh scripts/ownv2bxctl; do
+          for script in scripts/package-linux.sh scripts/install.sh scripts/xbrayctl; do
             bash -n "$script"
           done
       - name: Package and check executable
         run: |
           export SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           bash scripts/package-linux.sh
-      - name: Test binary installation
-        env:
-          ARCH: ${{ matrix.arch }}
-          XRAY_ASSET: ${{ matrix.xray }}
+      - name: Write the local panel test settings
         run: |
-          sudo bash scripts/install.sh --bundle "dist/ownv2bx-linux-$ARCH.tar.gz" \
-            --xray-zip "$RUNNER_TEMP/$XRAY_ASSET"
-          sudo /usr/local/bin/ownv2bxctl version
-          sudo test -f /etc/ownv2bx/node.env
-          test "$(sudo stat -c '%U:%a' /etc/ownv2bx/node.env)" = 'root:600'
-          sudo systemctl cat ownv2bx.service
-          systemctl show ownv2bx.service --property=LoadState --value | grep -qx loaded
-          systemctl show ownv2bx.service --property=ActiveState --value | grep -qx inactive
-      - name: Start installed service against a local panel
-        run: |
-          node --input-type=module -e '
-            import { createServer } from "node:http";
-            createServer(({ url }, response) => {
-              const endpoint = new URL(url, "http://localhost").pathname.split("/").at(-1);
-              const body = endpoint === "config"
-                ? { protocol: "vless", server_port: 14882, network: "tcp", tls: 0 }
-                : endpoint === "user" ? { users: [] } : { data: true };
-              response.writeHead(200, { "Content-Type": "application/json" });
-              response.end(JSON.stringify(body));
-            }).listen(14881, "127.0.0.1");
-          ' &
-          mock_pid=$!
-          trap 'sudo systemctl stop ownv2bx.service; kill "$mock_pid" 2>/dev/null || true' EXIT
-          timeout 10 bash -c 'until curl -fsS -o /dev/null http://127.0.0.1:14881/health; do sleep 1; done'
           cat > "$RUNNER_TEMP/test-node.env" <<'ENV'
           XBOARD_URL=http://127.0.0.1:14881
           XBOARD_TOKEN=local-workflow-test
@@ -138,21 +111,93 @@ jobs:
           ALLOW_PLAINTEXT_NODE=1
           PULL_INTERVAL=5
           ENV
+      - name: Test fresh binary installation
+        if: matrix.arch == 'amd64'
+        env:
+          ARCH: ${{ matrix.arch }}
+          XRAY_ASSET: ${{ matrix.xray }}
+        run: |
+          sudo bash scripts/install.sh --bundle "dist/xbray-linux-$ARCH.tar.gz" \
+            --xray-zip "$RUNNER_TEMP/$XRAY_ASSET"
+          sudo /usr/local/bin/xbrayctl version
+          sudo test -f /etc/xbray/node.env
+          test "$(sudo stat -c '%U:%a' /etc/xbray/node.env)" = 'root:600'
+          sudo systemctl cat xbray.service
+          systemctl show xbray.service --property=LoadState --value | grep -qx loaded
+          systemctl show xbray.service --property=ActiveState --value | grep -qx inactive
+          sudo install -m 0600 "$RUNNER_TEMP/test-node.env" /etc/xbray/node.env
+      - name: Migrate a running legacy service
+        if: matrix.arch == 'arm64'
+        env:
+          ARCH: ${{ matrix.arch }}
+          XRAY_ASSET: ${{ matrix.xray }}
+        run: |
+          sudo useradd --system --user-group --home-dir /var/lib/ownv2bx --shell /usr/sbin/nologin ownv2bx
+          sudo install -d -m 0700 /etc/ownv2bx
+          sudo install -d -m 0700 -o ownv2bx -g ownv2bx /var/lib/ownv2bx
+          sudo install -d -m 0755 /opt/ownv2bx
           sudo install -m 0600 "$RUNNER_TEMP/test-node.env" /etc/ownv2bx/node.env
-          sudo /usr/local/bin/ownv2bxctl config check
-          sudo /usr/local/bin/ownv2bxctl start
-          sudo /usr/local/bin/ownv2bxctl status
-          sudo test -d /var/lib/ownv2bx
+
+          node -e 'const scope = JSON.stringify(["http://127.0.0.1:14881/", "1", "vless"]); console.log(JSON.stringify({version: 1, scope, pending: {1: [123, 456]}}));' > "$RUNNER_TEMP/test-traffic.json"
+          sudo install -m 0600 -o ownv2bx -g ownv2bx "$RUNNER_TEMP/test-traffic.json" /var/lib/ownv2bx/traffic.json
+          cat > "$RUNNER_TEMP/legacy.service" <<'UNIT'
+          [Unit]
+          Description=Legacy service test fixture
+          [Service]
+          User=ownv2bx
+          ExecStart=/usr/bin/sleep infinity
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          sudo install -m 0644 "$RUNNER_TEMP/legacy.service" /etc/systemd/system/ownv2bx.service
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now ownv2bx.service
+          sudo systemctl is-active --quiet ownv2bx.service
+
+          sudo bash scripts/install.sh --bundle "dist/xbray-linux-$ARCH.tar.gz" \
+            --xray-zip "$RUNNER_TEMP/$XRAY_ASSET"
+          systemctl show ownv2bx.service --property=ActiveState --value | grep -qx inactive
+          systemctl show ownv2bx.service --property=UnitFileState --value | grep -qx disabled
+          sudo systemctl is-active --quiet xbray.service
+          sudo systemctl is-enabled --quiet xbray.service
+          sudo cmp /etc/ownv2bx/node.env /etc/xbray/node.env
+          sudo cmp /var/lib/ownv2bx/traffic.json /var/lib/xbray/traffic.json
+          test "$(sudo stat -c '%U:%a' /etc/xbray/node.env)" = 'root:600'
+          test "$(sudo stat -c '%U:%a' /var/lib/xbray/traffic.json)" = 'xbray:600'
+          sudo /usr/local/bin/xbrayctl version
+      - name: Start installed service against a local panel
+        run: |
+          node --input-type=module -e '
+            import { createServer } from "node:http";
+            createServer(({ url }, response) => {
+              const endpoint = new URL(url, "http://localhost").pathname.split("/").at(-1);
+              const body = endpoint === "config"
+                ? { protocol: "vless", server_port: 14882, network: "tcp", tls: 0 }
+                : endpoint === "user" ? { users: [] } : { data: endpoint !== "push" };
+              response.writeHead(200, { "Content-Type": "application/json" });
+              response.end(JSON.stringify(body));
+            }).listen(14881, "127.0.0.1");
+          ' &
+          mock_pid=$!
+          trap 'sudo systemctl stop xbray.service; kill "$mock_pid" 2>/dev/null || true' EXIT
+          timeout 10 bash -c 'until curl -fsS -o /dev/null http://127.0.0.1:14881/health; do sleep 1; done'
+          sudo /usr/local/bin/xbrayctl config check
+          sudo /usr/local/bin/xbrayctl start
+          sudo /usr/local/bin/xbrayctl status
+          sudo test -d /var/lib/xbray
           if ! timeout 20 bash -c 'until (echo > /dev/tcp/127.0.0.1/14882) 2>/dev/null; do sleep 1; done'; then
-            sudo /usr/local/bin/ownv2bxctl logs
+            sudo /usr/local/bin/xbrayctl logs
             exit 1
           fi
+          main_pid=$(systemctl show xbray.service --property=MainPID --value)
+          ps -o comm= -p "$main_pid" | grep -qx xbray
+          test "$(sudo readlink "/proc/$main_pid/exe")" = "$(readlink -f /opt/xbray/current/xbray)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ownv2bx-linux-${{ matrix.arch }}
+          name: xbray-linux-${{ matrix.arch }}
           path: |
-            dist/ownv2bx-linux-${{ matrix.arch }}.tar.gz
-            dist/ownv2bx-linux-${{ matrix.arch }}.tar.gz.sha256
+            dist/xbray-linux-${{ matrix.arch }}.tar.gz
+            dist/xbray-linux-${{ matrix.arch }}.tar.gz.sha256
           if-no-files-found: error
           compression-level: 0
 
@@ -164,14 +209,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: ownv2bx-linux-*
+          pattern: xbray-linux-*
           path: dist
           merge-multiple: true
       - name: Check release assets
         working-directory: dist
         run: |
-          sha256sum --check --strict ownv2bx-linux-amd64.tar.gz.sha256 ownv2bx-linux-arm64.tar.gz.sha256
-          tar -xOf ownv2bx-linux-amd64.tar.gz install.sh > install.sh
+          sha256sum --check --strict xbray-linux-amd64.tar.gz.sha256 xbray-linux-arm64.tar.gz.sha256
+          tar -xOf xbray-linux-amd64.tar.gz install.sh > install.sh
           sha256sum install.sh > install.sh.sha256
       - name: Publish release
         env:

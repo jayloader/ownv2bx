@@ -9,7 +9,7 @@ import { TrafficLedger } from '../src/traffic.mjs';
 const scope = 'https://example.test/|5';
 
 async function useLedger(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'ownv2bx-traffic-'));
+  const directory = await mkdtemp(join(tmpdir(), 'xbray-traffic-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const file = join(directory, 'state', 'traffic.json');
   const ledger = new TrafficLedger({ file, scope });

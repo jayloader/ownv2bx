@@ -1,22 +1,22 @@
 [Unit]
-Description=ownv2bx Xboard node
+Description=xbray Xboard node
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=exec
-User=ownv2bx
-Group=ownv2bx
-WorkingDirectory=/opt/ownv2bx/current
-EnvironmentFile=/etc/ownv2bx/node.env
-Environment=XRAY_BIN=/opt/ownv2bx/current/xray
-Environment=STATE_DIR=/var/lib/ownv2bx
-Environment=NODE_LOCK_DIR=/run/ownv2bx
-StateDirectory=ownv2bx
+User=xbray
+Group=xbray
+WorkingDirectory=/opt/xbray/current
+EnvironmentFile=/etc/xbray/node.env
+Environment=XRAY_BIN=/opt/xbray/current/xray
+Environment=STATE_DIR=/var/lib/xbray
+Environment=NODE_LOCK_DIR=/run/xbray
+StateDirectory=xbray
 StateDirectoryMode=0700
-RuntimeDirectory=ownv2bx
+RuntimeDirectory=xbray
 RuntimeDirectoryMode=0700
-ExecStart=/opt/ownv2bx/current/ownv2bx
+ExecStart=/opt/xbray/current/xbray
 Restart=on-failure
 RestartSec=5
 KillMode=mixed

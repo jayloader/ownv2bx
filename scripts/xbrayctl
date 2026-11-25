@@ -3,13 +3,13 @@
 set -u
 set -o pipefail
 
-unit=ownv2bx.service
-release=/opt/ownv2bx/current
-config=/etc/ownv2bx/node.env
+unit=xbray.service
+release=/opt/xbray/current
+config=/etc/xbray/node.env
 
 usage() {
     cat <<'EOF'
-用法：ownv2bxctl [命令]
+用法：xbrayctl [命令]
 
   status                      查看服务状态
   start | stop | restart      启动、停止或重启服务
@@ -17,7 +17,7 @@ usage() {
   disable [--now]              禁用开机启动，可同时停止服务
   logs [--follow] [行数]      查看日志，默认显示最近 100 行
   config [edit|check|path]     编辑配置、检查配置或查看配置路径
-  version                     显示 ownv2bx 和 Xray 版本
+  version                     显示 xbray 和 Xray 版本
   update [安装参数]            运行安装脚本更新，可指定版本或本地包
   rollback                    切换到上一个已安装版本
   help                        显示帮助
@@ -34,7 +34,7 @@ fail() {
 
 require_root() {
     if (( EUID != 0 )); then
-        fail '此命令需要 root 权限，请使用 sudo ownv2bxctl 运行。'
+        fail '此命令需要 root 权限，请使用 sudo xbrayctl 运行。'
     fi
 }
 
@@ -71,12 +71,12 @@ edit_config() (
         return
     fi
 
-    if ! "$release/ownv2bx" --check-config "$candidate"; then
+    if ! "$release/xbray" --check-config "$candidate"; then
         fail '配置检查失败，原配置已保留。'
         return 1
     fi
     chmod 0600 "$candidate" && mv -fT -- "$candidate" "$config" || return
-    printf '%s\n' '配置已保存。运行 sudo ownv2bxctl restart 使配置生效。'
+    printf '%s\n' '配置已保存。运行 sudo xbrayctl restart 使配置生效。'
 )
 
 service_action() {
@@ -89,7 +89,7 @@ service_action() {
             return
         fi
     fi
-    if (( $# > 0 )); then fail "无效参数。请查看 ownv2bxctl help。"; return 2; fi
+    if (( $# > 0 )); then fail '无效参数。请查看 xbrayctl help。'; return 2; fi
     systemctl "$action" -- "$unit"
 }
 
@@ -102,7 +102,7 @@ show_logs() {
     fi
     if (( $# > 0 )); then
         if [[ $# -ne 1 || ! $1 =~ ^[1-9][0-9]{0,4}$ ]]; then
-            fail '用法：ownv2bxctl logs [--follow] [行数]'
+            fail '用法：xbrayctl logs [--follow] [行数]'
             return 2
         fi
         lines=$1
@@ -118,15 +118,15 @@ dispatch() {
         start|stop|restart|enable|disable) service_action "$action" "$@" ;;
         logs) show_logs "$@" ;;
         config)
-            if (( $# > 1 )); then fail '用法：ownv2bxctl config [edit|check|path]'; return 2; fi
+            if (( $# > 1 )); then fail '用法：xbrayctl config [edit|check|path]'; return 2; fi
             case "${1:-edit}" in
                 edit) edit_config ;;
-                check) require_root && "$release/ownv2bx" --check-config "$config" ;;
+                check) require_root && "$release/xbray" --check-config "$config" ;;
                 path) printf '%s\n' "$config" ;;
-                *) fail '用法：ownv2bxctl config [edit|check|path]'; return 2 ;;
+                *) fail '用法：xbrayctl config [edit|check|path]'; return 2 ;;
             esac ;;
         version|--version)
-            "$release/ownv2bx" --version && "$release/xray" version | sed -n '1p' ;;
+            "$release/xbray" --version && "$release/xray" version | sed -n '1p' ;;
         update) bash "$release/install.sh" "$@" ;;
         rollback) require_root && bash "$release/install.sh" --rollback ;;
         help|-h|--help) usage ;;
@@ -139,7 +139,7 @@ menu() {
     while true; do
         cat <<'EOF'
 
-ownv2bx 管理
+xbray 管理
   1  服务状态           6  查看日志
   2  启动服务           7  编辑配置
   3  停止服务           8  查看版本

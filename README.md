@@ -1,4 +1,4 @@
-# ownv2bx
+# xbray
 
 连接 Xboard 面板和 Xray-core 的 VLESS 节点后端。它通过 UniProxy V1 定期拉取节点配置和有权限的用户，把上行、下行字节数及节点状态回报给面板。同一进程管理一个节点，可为不同节点分别运行实例。协议和入站连接由官方 Xray-core 处理，Node.js 服务没有第三方 npm 依赖。
 
@@ -13,24 +13,24 @@
 
 Release 提供 `amd64` 和 `arm64` 单文件程序，程序内含 Node.js 运行时。服务器只需 systemd、glibc 2.28+、libstdc++ 和 libatomic 等系统库。安装脚本会校验后端和官方 Xray-core v26.11.9 的下载包，并安装 systemd 服务。 [Node.js 单文件程序](https://nodejs.org/download/release/v26.13.1/docs/api/single-executable-applications.html) · [Xray-core v26.11.9](https://github.com/XTLS/Xray-core/releases/tag/v26.11.9)
 
-在 Debian 或 Ubuntu 上，使用 `sudo apt install libatomic1 ca-certificates curl unzip` 安装对应依赖。以有 `sudo` 权限的普通用户执行以下命令，从公开 Release 下载并校验安装脚本。 [GitHub Release](https://github.com/jayloader/ownv2bx/releases/latest)
+在 Debian 或 Ubuntu 上，使用 `sudo apt install libatomic1 ca-certificates curl unzip` 安装对应依赖。以有 `sudo` 权限的普通用户执行以下命令，从公开 Release 下载并校验安装脚本。 [GitHub Release](https://github.com/jayloader/xbray/releases/latest)
 
 ```sh
-base=https://github.com/jayloader/ownv2bx/releases/latest/download
+base=https://github.com/jayloader/xbray/releases/latest/download
 curl -fSLO "$base/install.sh" &&
   curl -fSLO "$base/install.sh.sha256" &&
   sha256sum -c install.sh.sha256 &&
   bash install.sh
 ```
 
-如需离线安装，下载对应架构的 `ownv2bx-linux-amd64.tar.gz` 或 `ownv2bx-linux-arm64.tar.gz` 及其 `.sha256`，再和安装脚本、官方 Xray 压缩包一起复制到服务器。以下示例以 `amd64` 为例。
+如需离线安装，下载对应架构的 `xbray-linux-amd64.tar.gz` 或 `xbray-linux-arm64.tar.gz` 及其 `.sha256`，再和安装脚本、官方 Xray 压缩包一起复制到服务器。以下示例以 `amd64` 为例。
 
 ```sh
 sha256sum -c install.sh.sha256
-bash install.sh --bundle ./ownv2bx-linux-amd64.tar.gz --xray-zip ./Xray-linux-64.zip
+bash install.sh --bundle ./xbray-linux-amd64.tar.gz --xray-zip ./Xray-linux-64.zip
 ```
 
-首次安装生成 `/etc/ownv2bx/node.env`，配置完成后在命令行管理菜单中启动服务。安装后由专用用户 `ownv2bx` 运行，默认将待上报流量保存在 `/var/lib/ownv2bx`。
+首次安装生成 `/etc/xbray/node.env`，配置完成后在命令行管理菜单中启动服务。安装后由专用用户 `xbray` 运行，默认将待上报流量保存在 `/var/lib/xbray`。
 
 ## 对接 Xboard
 
@@ -45,33 +45,39 @@ bash install.sh --bundle ./ownv2bx-linux-amd64.tar.gz --xray-zip ./Xray-linux-64
 | `XRAY_LISTEN` | 监听 IP，默认 `0.0.0.0`。 |
 | `XRAY_API_PORT`、`STATE_DIR` | 本机统计端口和状态目录。每个节点实例使用不同的端口和目录。 |
 
-TLS 节点的证书应覆盖客户端配置使用的域名，证书和私钥需能被 `ownv2bx` 服务读取。REALITY 节点在面板填入目标域名、目标端口、公钥、私钥和 Short ID。
+TLS 节点的证书应覆盖客户端配置使用的域名，证书和私钥需能被 `xbray` 服务读取。REALITY 节点在面板填入目标域名、目标端口、公钥、私钥和 Short ID。
 
 ```sh
-sudo ownv2bxctl config
-sudo ownv2bxctl enable --now
-ownv2bxctl status
+sudo xbrayctl config
+sudo xbrayctl enable --now
+xbrayctl status
 ```
 
 看到 `Xray 已载入节点配置` 后，从 Xboard 订阅导入节点并发起一次请求。面板的流量更新时间在第一次有流量的上报之后刷新。UniProxy V1 的鉴权密钥放在查询参数里，面板和反向代理的访问日志应避免记录该参数。仓库忽略默认状态目录、实际 `.env` 和常见私钥文件。 [Xboard UniProxy 路由](https://github.com/cedar2025/Xboard/blob/master/app/Http/Routes/V1/ServerRoute.php) · [节点鉴权](https://github.com/cedar2025/Xboard/blob/master/app/Http/Middleware/Server.php)
 
 ## 命令行管理
 
-运行 `sudo ownv2bxctl` 可打开有权限修改系统服务的中文菜单。公开仓库可以直接用 `ownv2bxctl update` 更新。使用 `--repo` 指定私有仓库时，先以有读取权限的普通用户登录 `gh`。 [GitHub CLI 下载 Release](https://cli.github.com/manual/gh_release_download)
+运行 `sudo xbrayctl` 可打开有权限修改系统服务的中文菜单。公开仓库可以直接用 `xbrayctl update` 更新。使用 `--repo` 指定私有仓库时，先以有读取权限的普通用户登录 `gh`。 [GitHub CLI 下载 Release](https://cli.github.com/manual/gh_release_download)
 
 | 命令 | 操作 |
 | --- | --- |
-| `ownv2bxctl status` | 查看服务状态。 |
-| `sudo ownv2bxctl start` / `sudo ownv2bxctl stop` / `sudo ownv2bxctl restart` | 启动、停止或重启。 |
-| `sudo ownv2bxctl enable --now` / `sudo ownv2bxctl disable` | 启动并设置开机启动，或取消开机启动。 |
-| `sudo ownv2bxctl logs` | 查看最近日志。 |
-| `sudo ownv2bxctl config` | 编辑并校验配置。 |
-| `ownv2bxctl version` | 查看后端和 Xray 版本。 |
-| `ownv2bxctl update` | 从 GitHub Release 拉取最新版。 |
-| `ownv2bxctl update --version v0.2.1` | 安装指定版本。也可传 `--bundle` 使用本地包。 |
-| `sudo ownv2bxctl rollback` | 切回上一个已安装版本。 |
+| `xbrayctl status` | 查看服务状态。 |
+| `sudo xbrayctl start` / `sudo xbrayctl stop` / `sudo xbrayctl restart` | 启动、停止或重启。 |
+| `sudo xbrayctl enable --now` / `sudo xbrayctl disable` | 启动并设置开机启动，或取消开机启动。 |
+| `sudo xbrayctl logs` | 查看最近日志。 |
+| `sudo xbrayctl config` | 编辑并校验配置。 |
+| `xbrayctl version` | 查看后端和 Xray 版本。 |
+| `xbrayctl update` | 从 GitHub Release 拉取最新版。 |
+| `xbrayctl update --version v0.3.0` | 安装指定版本。也可传 `--bundle` 使用本地包。 |
+| `sudo xbrayctl rollback` | 切回上一个已安装版本。 |
 
-更新保留 `/etc/ownv2bx/node.env` 和流量队列。运行中的服务会在更新时重启，若 systemd 启动失败会切回上一版。已安装 v0.2.0 的服务器按上面的匿名安装命令升级一次，之后即可直接使用 `ownv2bxctl update`。若未来版本更新所需的 Xray-core 版本，先重新下载对应 Release 的安装脚本再更新。
+更新保留 `/etc/xbray/node.env` 和流量队列。运行中的服务会在更新时重启，若 systemd 启动失败会切回上一版。若未来版本更新所需的 Xray-core 版本，先重新下载对应 Release 的安装脚本再更新。
+
+### 从 v0.2.x 迁移
+
+按上文的 Linux 安装命令重新下载并运行安装脚本。对于用旧版安装脚本部署的节点，配置和待上报流量会迁移到 `/etc/xbray` 和 `/var/lib/xbray`，运行状态和开机启动设置会转移到 `xbray.service`。运行中的节点在迁移时会短暂断开。迁移完成后用 `xbrayctl status` 查看服务，之后用 `xbrayctl update` 更新。
+
+旧服务使用自定义 systemd 覆盖配置、数据目录或 Xray 路径时，安装器会暂停自动迁移并提示需要处理的项目。旧配置和数据文件可用于迁移后的核对。
 
 ### 中断和计费
 

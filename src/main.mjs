@@ -12,6 +12,7 @@ import { TrafficLedger } from './traffic.mjs';
 import { XrayProcess } from './xray.mjs';
 
 async function run(settings) {
+  process.title = packageInfo.name;
   await mkdir(settings.stateDir, { recursive: true, mode: 0o700 });
   await mkdir(settings.lockDir, { recursive: true, mode: 0o700 });
   const lockPath = join(settings.lockDir, 'node.lock');
@@ -80,11 +81,11 @@ async function run(settings) {
 async function main(args) {
   if (args.length === 0) return run(readSettings());
   if (args.length === 1 && args[0] === '--version') {
-    console.log(`ownv2bx ${packageInfo.version}`);
+    console.log(`${packageInfo.name} ${packageInfo.version}`);
     return;
   }
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
-    console.log('用法：ownv2bx [--version | --check-config FILE]');
+    console.log(`用法：${packageInfo.name} [--version | --check-config FILE]`);
     return;
   }
   if (args.length === 2 && args[0] === '--check-config') {
